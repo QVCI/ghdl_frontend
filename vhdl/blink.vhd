@@ -22,7 +22,7 @@ begin
                 led_reg <= '0';
             else
                 counter <= counter + 1;
-                if counter = x"FFFFFF" then
+                if counter = x"000004" then
                     led_reg <= not led_reg;
                     counter <= (others => '0');
                 end if;

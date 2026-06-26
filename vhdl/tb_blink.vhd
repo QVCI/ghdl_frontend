@@ -23,26 +23,25 @@ begin
         variable lin  : line;
         variable lout : line;
         variable cmd  : character;
+        variable good : boolean;
     begin
         loop
-            -- Leer un solo caracter como comando
             readline(std.textio.input, lin);
-            read(lin, cmd);
+            read(lin, cmd, good);
+            if not good then next; end if;
 
-            if cmd = 'Q' then
-                exit;
-            elsif cmd = '1' then
+            if cmd = '1' then
                 sw <= '1';
                 wait for 1 ns;
             elsif cmd = '0' then
                 sw <= '0';
                 wait for 1 ns;
             elsif cmd = 'S' then
-                -- Un paso de reloj
                 wait until rising_edge(clk);
+            else
+                next;
             end if;
 
-            -- Responder estado
             write(lout, string'("LED "));
             if led = '1' then
                 write(lout, string'("1"));
@@ -50,7 +49,6 @@ begin
                 write(lout, string'("0"));
             end if;
             writeline(std.textio.output, lout);
-
         end loop;
         wait;
     end process;
