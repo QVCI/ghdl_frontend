@@ -1,7 +1,13 @@
 v 4
-file "C:\Users\carlo\Desktop\ghdl_frontend\" "vhdl\tb_blink.vhd" "4508cfbd80be0a4d7a50169bc727bdd981074526" "20260626015215.073":
-  entity tb_blink at 1( 0) + 0 on 101;
-  architecture sim of tb_blink at 8( 112) + 0 on 102;
+file "C:\Users\carlo\Desktop\ghdl_frontend\" "vhdl\tb_tang.vhd" "d0edb1d31eab77a7efa30f2613c473ca807626a1" "20260626024532.928":
+  entity tb_tang at 1( 0) + 0 on 143;
+  architecture sim of tb_tang at 9( 137) + 0 on 144;
+file "C:\Users\carlo\Desktop\ghdl_frontend\" "vhdl\tang_nano_9k.vhd" "16c9c295756928f75f29ca6eaccce791962cb9dd" "20260626024532.790":
+  entity tang_nano_9k at 1( 0) + 0 on 141;
+  architecture rtl of tang_nano_9k at 31( 1253) + 0 on 142;
 file "C:\Users\carlo\Desktop\ghdl_frontend\" "vhdl\blink.vhd" "77478237e837c212ade2224b8b45b05540089229" "20260626015214.993":
   entity blink at 1( 0) + 0 on 99;
   architecture rtl of blink at 13( 227) + 0 on 100;
+file "C:\Users\carlo\Desktop\ghdl_frontend\" "vhdl\tb_blink.vhd" "4508cfbd80be0a4d7a50169bc727bdd981074526" "20260626015215.073":
+  entity tb_blink at 1( 0) + 0 on 101;
+  architecture sim of tb_blink at 8( 112) + 0 on 102;
