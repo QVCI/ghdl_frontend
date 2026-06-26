@@ -1,0 +1,18 @@
+v 4
+file / "C:\Users\carlo\Desktop\ghdl_frontend\work_generic\Marquesina\tb_top_reg.vhd" "f8f82fffb0c8262f41b14c2c3aa6da513168ec2a" "20260626042002.004":
+  entity tb_top_reg at 1( 0) + 0 on 20;
+  architecture sim of tb_top_reg at 9( 143) + 0 on 21;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Marquesina\P8\src\PAQUETES.vhd" "95877599522ed235d001a8ff8b830014a1c08cbb" "20260626042001.877":
+  package paquetes at 1( 0) + 0 on 17;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Marquesina\P8\src\DIV.vhd" "f673ddaebbd0e65c4f82887217e163da81d3120e" "20260626042001.706":
+  entity div at 1( 0) + 0 on 13;
+  architecture a_div of div at 15( 276) + 0 on 14;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Marquesina\P8\src\CA.vhd" "0d04fc4d72b6b61e228765272b9717d8a9050078" "20260626042001.583":
+  entity ca at 1( 0) + 0 on 11;
+  architecture a_ca of ca at 11( 164) + 0 on 12;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Marquesina\P8\src\Hola.vhd" "0803d9d9109abff7926e9dfa9ba79bf506eaed66" "20260626042001.770":
+  entity hola at 1( 0) + 0 on 15;
+  architecture a_hola of hola at 11( 176) + 0 on 16;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Marquesina\P8\src\TOPLEVEL.vhd" "3172bdadadb24aceb501be67c5f7b26bc9607fea" "20260626042001.929":
+  entity top_reg at 1( 0) + 0 on 18;
+  architecture a_top of top_reg at 20( 361) + 0 on 19;

@@ -1,39 +1,45 @@
+"""
+main.py  —  Frontend VHDL genérico
+
+Abre cualquier directorio (o lista de archivos .vhd), descubre la entidad
+top-level, genera un testbench automático, compila con GHDL y muestra un
+panel de control con:
+  - Un toggle / spinner por cada puerto de entrada (no-clk)
+  - Un indicador numérico/binario por cada puerto de salida
+  - Controles de compilación y simulación
+"""
+
 import sys
 import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QCheckBox, QSlider, QGroupBox, QGridLayout,
-    QFrame, QSizePolicy, QToolButton
+    QPushButton, QLabel, QSpinBox, QGroupBox, QGridLayout,
+    QScrollArea, QFileDialog, QCheckBox, QSlider, QSizePolicy,
+    QComboBox,
 )
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
 from PySide6.QtGui import QFont, QPainter, QColor, QPen, QBrush
 
-from simulator import Simulator, compile_vhdl
-
-VHDL_DIR = "vhdl"
-TOP_ENTITY = "tb_tang"
-VHDL_FILES = [
-    os.path.join(VHDL_DIR, "tang_nano_9k.vhd"),
-    os.path.join(VHDL_DIR, "tb_tang.vhd"),
-]
+from project_discovery import discover, Project
+from orchestrator import compile_project
+from generic_simulator import GenericSimulator
+from port_layout import compute_layout
 
 
-# ─────────────────────────────────────────── Bridge
+# ── Bridge ────────────────────────────────────────────────────────────────────
 class Bridge(QObject):
     state_changed = Signal(dict)
 
 
-# ─────────────────────────────────────────── LED Widget
+# ── Small LED indicator ────────────────────────────────────────────────────────
 class LEDWidget(QLabel):
-    def __init__(self, color_on="#ff3300", color_off="#1a0000", size=28):
+    def __init__(self, color_on="#22ee44", color_off="#082208", size=18):
         super().__init__()
         self._on = False
-        self._color_on = color_on
+        self._color_on  = color_on
         self._color_off = color_off
-        r = size // 2
         self.setFixedSize(size, size)
-        self._r = r
-        self._size = size
+        self._r = size // 2
         self._refresh()
 
     def set_on(self, value: bool):
@@ -43,133 +49,108 @@ class LEDWidget(QLabel):
 
     def _refresh(self):
         color = self._color_on if self._on else self._color_off
-        glow = "box-shadow: 0 0 8px 3px " + self._color_on + ";" if self._on else ""
         self.setStyleSheet(f"""
             background-color: {color};
             border-radius: {self._r}px;
             border: 1px solid #444;
-            {glow}
         """)
 
 
-# ─────────────────────────────────────────── Switch Widget
-class SwitchWidget(QWidget):
-    toggled = Signal(bool)
+# ── Port output display ───────────────────────────────────────────────────────
+class PortOutputWidget(QWidget):
+    """Shows the current value of one output port (1-bit LED or N-bit number)."""
 
-    def __init__(self, label=""):
+    def __init__(self, port):
         super().__init__()
-        self._on = False
-        self._label = label
-        self.setFixedSize(36, 56)
-        self.setCursor(Qt.PointingHandCursor)
+        self._port = port
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
-    def is_on(self):
-        return self._on
+        name_lbl = QLabel(port.name)
+        name_lbl.setStyleSheet("color:#999; font-size:11px; min-width:80px;")
+        layout.addWidget(name_lbl)
 
-    def mousePressEvent(self, event):
-        self._on = not self._on
-        self.toggled.emit(self._on)
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-
-        # Body
-        body_color = QColor("#2a2a2a")
-        p.setBrush(QBrush(body_color))
-        p.setPen(QPen(QColor("#555"), 1))
-        p.drawRoundedRect(8, 4, 20, 44, 4, 4)
-
-        # Lever
-        lever_color = QColor("#cccccc") if not self._on else QColor("#88aaff")
-        p.setBrush(QBrush(lever_color))
-        p.setPen(Qt.NoPen)
-        if self._on:
-            p.drawRoundedRect(10, 6, 16, 20, 3, 3)
+        if port.width == 1:
+            self._led = LEDWidget()
+            layout.addWidget(self._led)
+            self._value_lbl = None
         else:
-            p.drawRoundedRect(10, 26, 16, 20, 3, 3)
+            self._led = None
+            self._value_lbl = QLabel("0")
+            self._value_lbl.setStyleSheet(
+                "color:#4fc; font-family:monospace; font-size:12px; min-width:60px;"
+            )
+            layout.addWidget(self._value_lbl)
+            self._bits_lbl = QLabel("0b" + "0" * port.width)
+            self._bits_lbl.setStyleSheet("color:#555; font-size:9px;")
+            layout.addWidget(self._bits_lbl)
 
-        # Label
-        if self._label:
-            p.setPen(QColor("#888"))
-            p.setFont(QFont("monospace", 7))
-            p.drawText(0, 50, 36, 10, Qt.AlignCenter, self._label)
+        layout.addStretch()
 
-
-# ─────────────────────────────────────────── 7-Segment Display Widget
-SEG_SEGS = "abcdefgp"   # order in the 8-bit word from testbench
-
-# Segment rectangles: (x, y, w, h, horizontal?)
-#  Layout for a single digit cell (60x90 px canvas)
-def _seg_rects(x0, y0, W=50, H=80, T=6):
-    """Returns dict of segment -> (x,y,w,h) for one digit."""
-    return {
-        'a': (x0+T,    y0,       W-2*T, T),       # top
-        'b': (x0+W-T,  y0+T,     T,     H//2-2*T),# top-right
-        'c': (x0+W-T,  y0+H//2+T,T,    H//2-2*T), # bot-right
-        'd': (x0+T,    y0+H-T,   W-2*T, T),       # bottom
-        'e': (x0,      y0+H//2+T,T,     H//2-2*T),# bot-left
-        'f': (x0,      y0+T,     T,     H//2-2*T),# top-left
-        'g': (x0+T,    y0+H//2-T//2, W-2*T, T),   # middle
-        'p': (x0+W+2,  y0+H-T,   T,     T),       # decimal point
-    }
+    def update(self, info: dict):
+        """info = {"bits": "0101", "value": 5, "width": 4}"""
+        bits   = info.get("bits",  "0" * self._port.width)
+        value  = info.get("value", 0)
+        if self._port.width == 1:
+            self._led.set_on(bits == "1")
+        else:
+            self._value_lbl.setText(str(value))
+            self._bits_lbl.setText("0b" + bits)
 
 
-class SevenSegWidget(QWidget):
-    """Draws 4 multiplexed seven-segment displays."""
+# ── Port input widget ─────────────────────────────────────────────────────────
+class PortInputWidget(QWidget):
+    """Control for one input port: toggle for 1-bit, spinbox for N-bit."""
 
-    def __init__(self):
+    value_changed = Signal(str, int)   # (port_name, new_value)
+
+    def __init__(self, port):
         super().__init__()
-        self.setMinimumSize(240, 110)
-        # digit_segs[i] = 8-bit bool list (a,b,c,d,e,f,g,dp), latched
-        self.digit_segs = [[False]*8 for _ in range(4)]
-        self._active = -1  # which digit is currently active (-1=none)
+        self._port = port
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
-    def update_state(self, digit_bits: list, seg_bits: list):
-        """digit_bits: 4 bools (active-low), seg_bits: 8 bools."""
-        active = -1
-        for i, d in enumerate(digit_bits):
-            if not d:  # active-low: False means active
-                active = i
-        if active >= 0:
-            self.digit_segs[active] = list(seg_bits)
-        self._active = active
-        self.update()
+        name_lbl = QLabel(port.name)
+        name_lbl.setStyleSheet("color:#bbb; font-size:11px; min-width:80px;")
+        layout.addWidget(name_lbl)
 
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor("#0d0d0d"))
+        if port.width == 1:
+            self._btn = QPushButton("0")
+            self._btn.setCheckable(True)
+            self._btn.setFixedWidth(40)
+            self._btn.toggled.connect(self._on_toggle)
+            layout.addWidget(self._btn)
+            self._spin = None
+        else:
+            self._spin = QSpinBox()
+            self._spin.setRange(0, (1 << port.width) - 1)
+            self._spin.setValue(0)
+            self._spin.setFixedWidth(90)
+            self._spin.valueChanged.connect(
+                lambda v: self.value_changed.emit(port.name, v)
+            )
+            layout.addWidget(self._spin)
+            width_lbl = QLabel(f"({port.width}b)")
+            width_lbl.setStyleSheet("color:#555; font-size:9px;")
+            layout.addWidget(width_lbl)
+            self._btn = None
 
-        W, H, T = 46, 76, 6
-        gap = 10
-        total_w = 4 * (W + gap + T + 4)
-        x_start = (self.width() - total_w) // 2
-        y_start = (self.height() - H) // 2
+        layout.addStretch()
 
-        seg_names = ['a','b','c','d','e','f','g','p']
-        col_on  = QColor("#ff4400")
-        col_off = QColor("#1a0800")
+    def _on_toggle(self, checked: bool):
+        self._btn.setText("1" if checked else "0")
+        self.value_changed.emit(self._port.name, int(checked))
 
-        for digit_idx in range(4):
-            x0 = x_start + digit_idx * (W + gap + T + 4)
-            rects = _seg_rects(x0, y_start, W, H, T)
-            segs = self.digit_segs[digit_idx]
-
-            for si, sname in enumerate(seg_names):
-                rx, ry, rw, rh = rects[sname]
-                color = col_on if segs[si] else col_off
-                p.setBrush(QBrush(color))
-                p.setPen(Qt.NoPen)
-                if sname == 'p':
-                    p.drawEllipse(rx, ry, rw, rh)
-                else:
-                    p.drawRoundedRect(rx, ry, rw, rh, 2, 2)
+    def current_value(self) -> int:
+        if self._btn:
+            return int(self._btn.isChecked())
+        return self._spin.value()
 
 
-# ─────────────────────────────────────────── Group Box helpers
-def make_group(title):
+# ── Group box helper ──────────────────────────────────────────────────────────
+def make_group(title: str) -> QGroupBox:
     g = QGroupBox(title)
     g.setStyleSheet("""
         QGroupBox {
@@ -185,171 +166,118 @@ def make_group(title):
     return g
 
 
-# ─────────────────────────────────────────── Main Window
+# ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Tang Nano 9K — Simulador")
-        self.setMinimumSize(700, 560)
-        self.sim = None
-        self.bridge = Bridge()
-        self.bridge.state_changed.connect(self._on_state)
+        self.setWindowTitle("GHDL Frontend — Genérico")
+        self.setMinimumSize(640, 480)
 
-        self._sw_active_high  = True
-        self._led_active_high = True
-        self._jumper_display  = False
+        self._project: Project | None  = None
+        self._layout                   = None
+        self._workdir                  = os.path.join(os.getcwd(), "work_generic")
+        self._tb_entity: str | None    = None
+        self._sim: GenericSimulator | None = None
+        self._bridge                   = Bridge()
+        self._bridge.state_changed.connect(self._on_state)
+
+        self._input_widgets:  list[PortInputWidget]  = []
+        self._output_widgets: list[PortOutputWidget] = []
 
         self._build_ui()
         self._apply_theme()
 
-    # ──────────────────────────── UI construction
+    # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        root_v = QVBoxLayout(root)
-        root_v.setSpacing(10)
-        root_v.setContentsMargins(16, 16, 16, 16)
+        v = QVBoxLayout(root)
+        v.setSpacing(10)
+        v.setContentsMargins(14, 14, 14, 14)
 
-        # ── Title row
-        title = QLabel("Tang Nano 9K — Simulador VHDL")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #eee;")
-        root_v.addWidget(title)
+        # Title
+        title = QLabel("GHDL Frontend — Simulador VHDL Genérico")
+        title.setStyleSheet("font-size:15px; font-weight:bold; color:#eee;")
+        v.addWidget(title)
 
-        self.status_label = QLabel("Estado: sin compilar")
-        self.status_label.setStyleSheet("color: #888; font-size: 12px;")
-        root_v.addWidget(self.status_label)
+        self._status = QLabel("Sin proyecto cargado.")
+        self._status.setStyleSheet("color:#888; font-size:11px;")
+        v.addWidget(self._status)
 
-        # ── LED section
-        led_group = make_group("LEDs (16)")
-        led_layout = QVBoxLayout(led_group)
-        self.led_widgets = []
-        led_names = [
-            ["L15","L14","L13","L12"],
-            ["L11","L10","L9","L8"],
-            ["L7","L6","L5","L4"],
-            ["L3","L2","L1","L0"],
-        ]
-        for row_labels in led_names:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            for lbl in row_labels:
-                col = QVBoxLayout()
-                col.setSpacing(2)
-                w = LEDWidget()
-                l = QLabel(lbl)
-                l.setStyleSheet("color:#666; font-size:9px;")
-                l.setAlignment(Qt.AlignCenter)
-                col.addWidget(w, alignment=Qt.AlignCenter)
-                col.addWidget(l)
-                row.addLayout(col)
-                self.led_widgets.append(w)
-            row.addStretch()
-            led_layout.addLayout(row)
-        root_v.addWidget(led_group)
+        # File/project controls
+        proj_group = make_group("Proyecto")
+        proj_h = QHBoxLayout(proj_group)
+        self._path_label = QLabel("—")
+        self._path_label.setStyleSheet("color:#aaa; font-size:10px;")
+        self._path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        proj_h.addWidget(self._path_label)
+        btn_dir = QPushButton("📂 Abrir directorio…")
+        btn_dir.clicked.connect(self._open_directory)
+        proj_h.addWidget(btn_dir)
+        btn_files = QPushButton("📄 Abrir archivos .vhd…")
+        btn_files.clicked.connect(self._open_files)
+        proj_h.addWidget(btn_files)
+        v.addWidget(proj_group)
 
-        # ── 7-Segment display section
-        seg_group = make_group("Display 7 Segmentos (4 dígitos multiplexados)")
-        seg_layout = QVBoxLayout(seg_group)
-        self.seg_widget = SevenSegWidget()
-        self.seg_widget.setFixedHeight(110)
-        seg_layout.addWidget(self.seg_widget)
+        # Entity / top-level selector
+        ent_group = make_group("Entidad top-level")
+        ent_h = QHBoxLayout(ent_group)
+        ent_lbl = QLabel("Entidad:")
+        ent_lbl.setStyleSheet("color:#aaa; font-size:11px;")
+        ent_h.addWidget(ent_lbl)
+        self._entity_combo = QComboBox()
+        self._entity_combo.setMinimumWidth(200)
+        self._entity_combo.currentIndexChanged.connect(self._on_entity_selected)
+        ent_h.addWidget(self._entity_combo)
+        ent_h.addStretch()
+        v.addWidget(ent_group)
 
-        # Jumper selector
-        jmp_row = QHBoxLayout()
-        jmp_row.addWidget(QLabel("Jumper:"))
-        self.jmp_leds_btn = QPushButton("LEDS")
-        self.jmp_disp_btn = QPushButton("DISPLAY")
-        for b in [self.jmp_leds_btn, self.jmp_disp_btn]:
-            b.setCheckable(True)
-            b.setFixedWidth(90)
-        self.jmp_leds_btn.setChecked(True)
-        self.jmp_leds_btn.clicked.connect(lambda: self._set_jumper(False))
-        self.jmp_disp_btn.clicked.connect(lambda: self._set_jumper(True))
-        jmp_row.addWidget(self.jmp_leds_btn)
-        jmp_row.addWidget(self.jmp_disp_btn)
-        jmp_row.addStretch()
-        seg_layout.addLayout(jmp_row)
-        root_v.addWidget(seg_group)
+        # Ports area (scrollable, rebuilt when a project loads)
+        self._ports_container = QWidget()
+        self._ports_layout    = QVBoxLayout(self._ports_container)
+        self._ports_layout.setSpacing(6)
 
-        # ── Switch section
-        sw_group = make_group("Switches (16)")
-        sw_layout = QVBoxLayout(sw_group)
-        self.sw_widgets = []
-        sw_labels = [
-            ["SW16","SW15","SW14","SW13"],
-            ["SW12","SW11","SW10","SW9"],
-            ["SW8","SW7","SW6","SW5"],
-            ["SW4","SW3","SW2","SW1"],
-        ]
-        for gi, row_labels in enumerate(sw_labels):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            lbl = QLabel(f"G{gi+1}")
-            lbl.setStyleSheet("color:#666; font-size:10px; min-width:20px;")
-            row.addWidget(lbl)
-            for li, sname in enumerate(row_labels):
-                sw_idx = gi * 4 + li
-                col = QVBoxLayout()
-                col.setSpacing(2)
-                sw = SwitchWidget(sname)
-                sw.toggled.connect(lambda val, idx=sw_idx: self._on_switch(idx, val))
-                name_lbl = QLabel(sname)
-                name_lbl.setStyleSheet("color:#555; font-size:8px;")
-                name_lbl.setAlignment(Qt.AlignCenter)
-                col.addWidget(sw, alignment=Qt.AlignCenter)
-                row.addLayout(col)
-                self.sw_widgets.append(sw)
-            row.addStretch()
-            sw_layout.addLayout(row)
-        root_v.addWidget(sw_group)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._ports_container)
+        scroll.setMinimumHeight(200)
+        v.addWidget(scroll, stretch=1)
 
-        # ── Config + Controls row
+        # Speed + controls
         bottom = QHBoxLayout()
 
-        # Config
-        cfg_group = make_group("Configuración")
+        cfg_group = make_group("Simulación")
         cfg_v = QVBoxLayout(cfg_group)
-
-        self.sw_pol = QCheckBox("Switches activos en ALTO (UP=1)")
-        self.sw_pol.setChecked(True)
-        self.sw_pol.toggled.connect(self._on_sw_polarity)
-        cfg_v.addWidget(self.sw_pol)
-
-        self.led_pol = QCheckBox("LEDs activos en ALTO")
-        self.led_pol.setChecked(True)
-        self.led_pol.toggled.connect(self._on_led_polarity)
-        cfg_v.addWidget(self.led_pol)
-
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("Velocidad:"))
-        self.speed_slider = QSlider(Qt.Horizontal)
-        self.speed_slider.setRange(10, 2000)
-        self.speed_slider.setValue(100)
-        self.speed_slider.valueChanged.connect(self._on_speed)
-        speed_row.addWidget(self.speed_slider)
-        self.speed_lbl = QLabel("100 pasos/frame")
-        self.speed_lbl.setStyleSheet("color:#888; font-size:10px; min-width:110px;")
-        speed_row.addWidget(self.speed_lbl)
+        self._speed = QSlider(Qt.Horizontal)
+        self._speed.setRange(10, 2000)
+        self._speed.setValue(100)
+        self._speed.valueChanged.connect(self._on_speed)
+        speed_row.addWidget(self._speed)
+        self._speed_lbl = QLabel("100 pasos/frame")
+        self._speed_lbl.setStyleSheet("color:#888; font-size:10px; min-width:110px;")
+        speed_row.addWidget(self._speed_lbl)
         cfg_v.addLayout(speed_row)
         bottom.addWidget(cfg_group)
 
-        # Compile/run controls
         ctrl_group = make_group("Control")
         ctrl_v = QVBoxLayout(ctrl_group)
-        self.btn_compile = QPushButton("⚙ Compilar VHDL")
-        self.btn_compile.clicked.connect(self._compile)
-        self.btn_start = QPushButton("▶ Iniciar")
-        self.btn_start.clicked.connect(self._start)
-        self.btn_start.setEnabled(False)
-        self.btn_stop = QPushButton("■ Detener")
-        self.btn_stop.clicked.connect(self._stop)
-        self.btn_stop.setEnabled(False)
-        for b in [self.btn_compile, self.btn_start, self.btn_stop]:
-            b.setMinimumHeight(32)
+        self._btn_compile = QPushButton("⚙ Compilar VHDL")
+        self._btn_compile.setEnabled(False)
+        self._btn_compile.clicked.connect(self._compile)
+        self._btn_start = QPushButton("▶ Iniciar")
+        self._btn_start.setEnabled(False)
+        self._btn_start.clicked.connect(self._start)
+        self._btn_stop = QPushButton("■ Detener")
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._stop)
+        for b in [self._btn_compile, self._btn_start, self._btn_stop]:
+            b.setMinimumHeight(30)
             ctrl_v.addWidget(b)
         bottom.addWidget(ctrl_group)
 
-        root_v.addLayout(bottom)
+        v.addLayout(bottom)
 
     def _apply_theme(self):
         self.setStyleSheet("""
@@ -370,92 +298,210 @@ class MainWindow(QMainWindow):
                 margin:-5px 0; border-radius:7px;
             }
             QLabel { color: #ccc; }
+            QSpinBox {
+                background: #252525; color: #eee;
+                border: 1px solid #444; border-radius: 3px; padding: 2px 4px;
+            }
+            QScrollArea { border: none; }
+            QComboBox {
+                background: #252525; color: #eee;
+                border: 1px solid #444; border-radius: 3px; padding: 2px 6px;
+            }
+            QComboBox QAbstractItemView { background: #222; color: #eee; }
         """)
 
-    # ──────────────────────────── Slots
-    def _compile(self):
-        self.status_label.setText("Compilando…")
-        self.status_label.setStyleSheet("color: orange; font-size:12px;")
-        QApplication.processEvents()
-        ok, err = compile_vhdl(VHDL_FILES, TOP_ENTITY)
-        if ok:
-            self.status_label.setText("✓ Compilación exitosa")
-            self.status_label.setStyleSheet("color: #4caf50; font-size:12px;")
-            self.btn_start.setEnabled(True)
+    # ── File open ─────────────────────────────────────────────────────────────
+    def _open_directory(self):
+        d = QFileDialog.getExistingDirectory(self, "Seleccionar directorio de proyecto")
+        if d:
+            self._load_project(discover(d))
+
+    def _open_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar archivos VHDL", "", "VHDL (*.vhd *.vhdl)"
+        )
+        if files:
+            self._load_project(discover(files))
+
+    # ── Project loading ───────────────────────────────────────────────────────
+    def _load_project(self, proj: Project):
+        self._project = proj
+        self._stop()
+
+        self._path_label.setText(
+            proj.vhd_files[0] if len(proj.vhd_files) == 1
+            else f"{len(proj.vhd_files)} archivos cargados"
+        )
+
+        # Populate entity combo
+        self._entity_combo.blockSignals(True)
+        self._entity_combo.clear()
+        for ent in proj.all_entities:
+            self._entity_combo.addItem(ent.name, ent)
+        # Select the auto-detected top
+        if proj.top_entity:
+            idx = next(
+                (i for i, e in enumerate(proj.all_entities)
+                 if e.name == proj.top_entity.name),
+                0,
+            )
+            self._entity_combo.setCurrentIndex(idx)
+        self._entity_combo.blockSignals(False)
+
+        if proj.error:
+            self._set_status(f"⚠ {proj.error}", "#f80")
         else:
-            self.status_label.setText(f"✗ Error: {err[:120]}")
-            self.status_label.setStyleSheet("color: #f44; font-size:12px;")
+            self._set_status(
+                f"Proyecto cargado: {proj.label} — "
+                f"entidad top: '{proj.top_entity.name}' "
+                f"({len(proj.top_entity.ports)} puertos)",
+                "#4fc"
+            )
+
+        self._rebuild_ports_ui()
+        self._btn_compile.setEnabled(proj.top_entity is not None)
+        self._btn_start.setEnabled(False)
+
+    def _on_entity_selected(self, index: int):
+        """User manually picked a different entity from the combo."""
+        if self._project is None:
+            return
+        ent = self._entity_combo.itemData(index)
+        if ent is not None:
+            self._project.top_entity = ent
+            self._rebuild_ports_ui()
+            self._btn_compile.setEnabled(True)
+            self._btn_start.setEnabled(False)
+            self._set_status(f"Entidad seleccionada: '{ent.name}' ({len(ent.ports)} puertos)", "#4fc")
+
+    def _rebuild_ports_ui(self):
+        """Tear down and rebuild the port widgets for the current top entity."""
+        # Remove old widgets
+        for w in self._input_widgets + self._output_widgets:
+            w.setParent(None)
+        self._input_widgets.clear()
+        self._output_widgets.clear()
+
+        # Clear layout
+        while self._ports_layout.count():
+            item = self._ports_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        ent = self._project.top_entity if self._project else None
+        if ent is None:
+            return
+
+        layout = compute_layout(ent)
+        self._layout = layout
+
+        # Outputs
+        if layout.out_ports:
+            out_group = make_group(f"Salidas ({len(layout.out_ports)} puertos)")
+            out_v = QVBoxLayout(out_group)
+            for p in layout.out_ports:
+                w = PortOutputWidget(p)
+                out_v.addWidget(w)
+                self._output_widgets.append(w)
+            self._ports_layout.addWidget(out_group)
+
+        # Inputs
+        if layout.data_in_ports:
+            in_group = make_group(
+                f"Entradas ({len(layout.data_in_ports)} puertos)"
+                + (f" — clk: '{layout.clk_port.name}'" if layout.clk_port else " — sin clk")
+            )
+            in_v = QVBoxLayout(in_group)
+            for p in layout.data_in_ports:
+                w = PortInputWidget(p)
+                w.value_changed.connect(self._on_input_changed)
+                in_v.addWidget(w)
+                self._input_widgets.append(w)
+            self._ports_layout.addWidget(in_group)
+
+        if layout.clk_port:
+            clk_info = QLabel(f"⏱ Clock: '{layout.clk_port.name}' — gestionado automáticamente")
+            clk_info.setStyleSheet("color:#666; font-size:10px;")
+            self._ports_layout.addWidget(clk_info)
+
+        self._ports_layout.addStretch()
+
+    # ── Compile / run ─────────────────────────────────────────────────────────
+    def _compile(self):
+        if self._project is None or self._project.top_entity is None:
+            return
+        self._set_status("Compilando…", "orange")
+        QApplication.processEvents()
+
+        result = compile_project(self._project, self._workdir)
+        if result["ok"]:
+            self._tb_entity = result["tb_entity"]
+            self._compiled_workdir = result["workdir"]
+            self._set_status(
+                f"✓ Compilación exitosa — testbench: '{self._tb_entity}'", "#4caf50"
+            )
+            self._btn_start.setEnabled(True)
+        else:
+            self._tb_entity = None
+            self._set_status(f"✗ Error de compilación: {result['error'][:150]}", "#f44")
+            self._btn_start.setEnabled(False)
 
     def _start(self):
-        if self.sim:
-            self.sim.stop()
-        self.sim = Simulator(
-            top_entity=TOP_ENTITY,
-            on_state_update=lambda s: self.bridge.state_changed.emit(s),
-            sw_active_high=self._sw_active_high,
-            led_active_high=self._led_active_high,
-            steps_per_frame=self.speed_slider.value(),
+        if not self._tb_entity or self._layout is None:
+            return
+        self._stop()
+
+        self._sim = GenericSimulator(
+            workdir=self._compiled_workdir,
+            tb_entity=self._tb_entity,
+            layout=self._layout,
+            on_state_update=lambda s: self._bridge.state_changed.emit(s),
+            steps_per_frame=self._speed.value(),
         )
-        # Apply current switch states
-        for i, sw in enumerate(self.sw_widgets):
-            self.sim.set_switch(i, sw.is_on())
-        self.sim.set_jumper(self._jumper_display)
-        self.sim.start()
-        self.status_label.setText("▶ Simulando…")
-        self.status_label.setStyleSheet("color: #5af; font-size:12px;")
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+        # Push current input values
+        for w in self._input_widgets:
+            self._sim.set_input(w._port.name, w.current_value())
+
+        ok = self._sim.start()
+        if ok:
+            self._set_status("▶ Simulando…", "#5af")
+            self._btn_start.setEnabled(False)
+            self._btn_stop.setEnabled(True)
+        else:
+            self._set_status("✗ No se pudo iniciar el simulador.", "#f44")
+            self._sim = None
 
     def _stop(self):
-        if self.sim:
-            self.sim.stop()
-            self.sim = None
-        self.status_label.setText("■ Detenido")
-        self.status_label.setStyleSheet("color: #888; font-size:12px;")
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        if self._sim:
+            self._sim.stop()
+            self._sim = None
+        self._btn_start.setEnabled(self._tb_entity is not None)
+        self._btn_stop.setEnabled(False)
+        if self._tb_entity:
+            self._set_status("■ Detenido", "#888")
 
-    def _on_switch(self, idx: int, value: bool):
-        if self.sim:
-            self.sim.set_switch(idx, value)
+    # ── Slots ─────────────────────────────────────────────────────────────────
+    def _on_input_changed(self, port_name: str, value: int):
+        if self._sim:
+            self._sim.set_input(port_name, value)
 
-    def _set_jumper(self, display_mode: bool):
-        self._jumper_display = display_mode
-        self.jmp_leds_btn.setChecked(not display_mode)
-        self.jmp_disp_btn.setChecked(display_mode)
-        if self.sim:
-            self.sim.set_jumper(display_mode)
-
-    def _on_sw_polarity(self, checked):
-        self._sw_active_high = checked
-        if self.sim:
-            self.sim.sw_active_high = checked
-
-    def _on_led_polarity(self, checked):
-        self._led_active_high = checked
-        if self.sim:
-            self.sim.led_active_high = checked
-
-    def _on_speed(self, value):
-        self.speed_lbl.setText(f"{value} pasos/frame")
-        if self.sim:
-            self.sim.steps_per_frame = value
+    def _on_speed(self, v: int):
+        self._speed_lbl.setText(f"{v} pasos/frame")
+        if self._sim:
+            self._sim.steps_per_frame = v
 
     def _on_state(self, state: dict):
-        # LEDs
-        leds = state.get("leds", [False]*16)
-        for i, w in enumerate(self.led_widgets):
-            w.set_on(leds[i] if i < len(leds) else False)
+        for w in self._output_widgets:
+            info = state.get(w._port.name)
+            if info:
+                w.update(info)
 
-        # 7-seg
-        self.seg_widget.update_state(
-            state.get("seg_digit", [True]*4),
-            state.get("seg_segs",  [False]*8),
-        )
+    def _set_status(self, msg: str, color: str = "#888"):
+        self._status.setText(msg)
+        self._status.setStyleSheet(f"color:{color}; font-size:11px;")
 
     def closeEvent(self, event):
-        if self.sim:
-            self.sim.stop()
+        self._stop()
         event.accept()
 
 

@@ -1,0 +1,7 @@
+v 4
+file / "C:\Users\carlo\Desktop\ghdl_frontend\work_generic\Dado_Digital\tb_dado.vhd" "d89311e6c91677068415034defae8aedf07ad7c6" "20260626042055.792":
+  entity tb_dado at 1( 0) + 0 on 13;
+  architecture sim of tb_dado at 9( 137) + 0 on 14;
+file / "C:\Users\carlo\Desktop\PracticasDSD\Dado Digital\Dado Digital\src\Dado.vhd" "37dfb7ac479695b289edcc877ee723a42b9b585a" "20260626042055.708":
+  entity dado at 1( 0) + 0 on 11;
+  architecture a_dado of dado at 15( 269) + 0 on 12;
